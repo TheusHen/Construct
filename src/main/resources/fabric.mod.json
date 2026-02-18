@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "id": "construct",
+  "version": "${version}",
+  "name": "Construct",
+  "description": "",
+  "authors": [],
+  "contact": {},
+  "license": "MIT",
+  "icon": "assets/construct/icon.png",
+  "environment": "*",
+  "entrypoints": {
+    "fabric-datagen": [
+      "org.theushen.construct.client.ConstructDataGenerator"
+    ],
+    "client": [
+      "org.theushen.construct.client.ConstructClient"
+    ],
+    "main": [
+      "org.theushen.construct.Construct"
+    ]
+  },
+  "mixins": [
+    "construct.mixins.json",
+    {
+      "config": "construct.client.mixins.json",
+      "environment": "client"
+    }
+  ],
+  "depends": {
+    "fabricloader": ">=${loader_version}",
+    "fabric-api": "*",
+    "minecraft": "${minecraft_version}"
+  }
+}
