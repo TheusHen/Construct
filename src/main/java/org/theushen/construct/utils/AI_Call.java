@@ -189,7 +189,24 @@ public class AI_Call {
     }
 
     private static String buildPrompt(String buildingRequest) {
-        return buildingRequest;
+        String request = oneLine(buildingRequest);
+        return ("""
+                Request: %s
+
+                Return a finished Minecraft blueprint JSON for this request.
+                Prefer a complete, fully specified structure over a giant empty footprint.
+                Prefer `blocks` as nested 3D palette ids in `blocks[y][z][x]` when possible.
+                If the structure would be too large to describe cleanly, reduce the dimensions and finish it properly.
+                Never send placeholder data, never send all zeros, and never leave the build mostly undefined.
+
+                Silently self-check before answering:
+                - JSON has one balanced root object
+                - palette[0] is minecraft:air
+                - every block id is within palette range
+                - the structure contains many non-air blocks
+
+                Output only JSON.
+                """).formatted(request).strip();
     }
 
     private static byte[] tryDecodeJsonBlueprint(String raw, StringBuilder diag) {
@@ -320,29 +337,84 @@ public class AI_Call {
 
     /** Closes any unclosed JSON arrays/objects caused by a truncated response. */
     private static String repairTruncatedJson(String candidate) {
-        if (candidate == null) return "";
-        // Strip trailing comma left by the cut-off
-        String s = candidate.trim().replaceAll(",\\s*$", "");
+        if (candidate == null) {
+            return "";
+        }
+        return repairJsonStructure(candidate.trim().replaceAll(",\\s*$", ""));
+    }
 
-        int openBrackets = 0;
-        int openBraces = 0;
+    private static String repairJsonStructure(String candidate) {
+        if (candidate == null || candidate.isBlank()) {
+            return "";
+        }
+
+        String source = candidate.trim().replaceAll(",\\s*$", "");
+        StringBuilder out = new StringBuilder(source.length() + 8);
+        List<Character> stack = new ArrayList<>();
         boolean inString = false;
         boolean escape = false;
-        for (int i = 0; i < s.length(); i++) {
-            char c = s.charAt(i);
-            if (escape) { escape = false; continue; }
-            if (c == '\\' && inString) { escape = true; continue; }
-            if (c == '"') { inString = !inString; continue; }
-            if (inString) continue;
-            if (c == '[') openBrackets++;
-            else if (c == ']') openBrackets = Math.max(0, openBrackets - 1);
-            else if (c == '{') openBraces++;
-            else if (c == '}') openBraces = Math.max(0, openBraces - 1);
+
+        for (int i = 0; i < source.length(); i++) {
+            char c = source.charAt(i);
+            if (escape) {
+                out.append(c);
+                escape = false;
+                continue;
+            }
+            if (c == '\\' && inString) {
+                out.append(c);
+                escape = true;
+                continue;
+            }
+            if (c == '"') {
+                out.append(c);
+                inString = !inString;
+                continue;
+            }
+            if (inString) {
+                out.append(c);
+                continue;
+            }
+
+            if (c == '{' || c == '[') {
+                stack.add(c);
+                out.append(c);
+                continue;
+            }
+
+            if (c == '}' || c == ']') {
+                char expectedOpen = c == '}' ? '{' : '[';
+                int matchIndex = lastIndexOf(stack, expectedOpen);
+                if (matchIndex < 0) {
+                    continue;
+                }
+                while (stack.size() - 1 > matchIndex) {
+                    char open = stack.remove(stack.size() - 1);
+                    out.append(open == '{' ? '}' : ']');
+                }
+                stack.remove(stack.size() - 1);
+                out.append(c);
+                continue;
+            }
+
+            out.append(c);
         }
-        StringBuilder sb = new StringBuilder(s);
-        for (int i = 0; i < openBrackets; i++) sb.append(']');
-        for (int i = 0; i < openBraces; i++) sb.append('}');
-        return sb.toString();
+
+        while (!stack.isEmpty()) {
+            char open = stack.remove(stack.size() - 1);
+            out.append(open == '{' ? '}' : ']');
+        }
+
+        return out.toString().replaceAll(",\\s*([}\\]])", "$1");
+    }
+
+    private static int lastIndexOf(List<Character> values, char target) {
+        for (int i = values.size() - 1; i >= 0; i--) {
+            if (values.get(i) == target) {
+                return i;
+            }
+        }
+        return -1;
     }
 
     private static List<String> extractBase64Candidates(String raw) {
@@ -436,11 +508,13 @@ public class AI_Call {
         int end = text.lastIndexOf('}');
         if (start >= 0 && end > start) {
             text = text.substring(start, end + 1);
+        } else if (start >= 0) {
+            text = text.substring(start);
         }
         text = text.replace('\u201C', '"').replace('\u201D', '"');
         text = text.replace('\u2018', '\'').replace('\u2019', '\'');
         text = text.replaceAll(",\\s*([}\\]])", "$1");
-        return text;
+        return repairJsonStructure(text);
     }
 
     private static byte[] schemFromBlueprint(JsonNode root) throws Exception {
@@ -539,7 +613,10 @@ public class AI_Call {
                     LOGGER.warn("AI_Call blocks array truncated: got={}, expected={}, padding {} with air",
                             flat.size(), total, total - flat.size());
                 }
-                return ids;
+                if (containsNonAirIds(ids, airIndex) || !hasAlternativeBlockRepresentation(root)) {
+                    return ids;
+                }
+                LOGGER.warn("AI_Call ignoring all-air blocks array because alternative block data exists");
             }
 
             if (is3dBlockArray(blocksNode, width, height, length)) {
@@ -618,6 +695,21 @@ public class AI_Call {
             throw new IllegalStateException("blueprint block id out of palette range at index " + index);
         }
         return id;
+    }
+
+    private static boolean containsNonAirIds(int[] ids, int airIndex) {
+        for (int id : ids) {
+            if (id != airIndex) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean hasAlternativeBlockRepresentation(JsonNode root) {
+        return root.path("layers").isArray()
+                || root.path("placements").isArray()
+                || root.path("voxels").isArray();
     }
 
     private static boolean is3dBlockArray(JsonNode blocksNode, int width, int height, int length) {
