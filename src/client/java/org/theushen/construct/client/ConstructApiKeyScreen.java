@@ -48,7 +48,8 @@ public class ConstructApiKeyScreen extends Screen {
 
     @Override
     public void render(DrawContext context, int mouseX, int mouseY, float delta) {
-        this.renderBackground(context, mouseX, mouseY, delta);
+        // Avoid applying blur twice in the same frame (can crash on some screen API paths).
+        context.fillGradient(0, 0, this.width, this.height, 0xC0101010, 0xD0101010);
         super.render(context, mouseX, mouseY, delta);
 
         String key = ConstructKeyConfig.getKey();
