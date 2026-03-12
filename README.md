@@ -1,41 +1,115 @@
 ﻿# Construct
 
-Construct is a Minecraft Fabric mod that generates `.schem` data from text prompts using Hack Club AI.
+Construct is a Minecraft Fabric mod that generates `.schem` files from text prompts using Gemini AI.
 
-## What It Does
+The idea is simple: instead of building everything block by block, you can describe a structure in plain text and let the mod generate a schematic for you. For example, a prompt like "medieval stone tower" can produce a build that you can later place in your world.
 
-- Provides the `/construct <building>` server command
-- Sends AI requests asynchronously
-- Shows progress feedback while requests are running
-- Stores a short per-user history via `/history`
-- Supports API key setup from the client with `/constructapikey`
+This project was created to make experimenting with builds faster and more fun, especially when prototyping ideas.
+
+---
+
+## How It Works
+
+The mod adds a set of server commands that allow players to send prompts to the Gemini AI API.  
+The server processes the request and returns the generated schematic once the job is finished.
+
+Generation happens asynchronously, so the server does not freeze while the request is being processed. While waiting, players receive progress feedback so they know the job is still running.
+
+Each player also has access to a small personal history of previous generation requests.
+
+---
 
 ## Requirements
 
-- Java 21+
-- Gradle (or use the included wrapper)
-- A valid Hack Club AI API key
+Before running the mod, make sure you have:
 
-## Quick Start
+- **Java 21 or newer**
+- **Gradle** (or use the included Gradle wrapper)
+- A **Gemini AI API key**
+
+---
+
+## Build
+
+To compile the mod, run:
 
 ```bash
 ./gradlew build
+````
+
+After the build finishes, the compiled `.jar` file will be available in:
+
+```
+build/libs/
 ```
 
-Set your API key in game using `/constructapikey`, then run:
+---
 
-```text
-/construct <your building prompt>
+## API Key Setup
+
+Inside the game, run:
+
 ```
+/constructapikey
+```
+
+This opens the screen where you can enter your Gemini AI API key.
+
+The key will be saved locally in the client configuration file:
+
+```
+construct.json
+```
+
+If you ever want to remove the stored key, run:
+
+```
+/constructapikey clear
+```
+
+---
 
 ## Commands
 
-- `/construct <building>`: start a generation request
-- `/history [limit]`: show recent jobs for the player
-- `/constructapikey`: open API key screen on client
-- `/constructapikey clear`: clear stored key
+### `/construct <building>`
 
-## Notes
+Starts a generation request using the provided prompt.
 
-- API keys are stored in the client config file (`construct.json`).
-- Server-side fallback key resolution is supported via runtime properties/env vars.
+Example:
+
+```
+/construct small japanese shrine
+```
+
+---
+
+### `/history [limit]`
+
+Displays recent generation requests made by the player.
+
+You can optionally provide a number to limit how many results are shown.
+
+Example:
+
+```
+/history 5
+```
+
+---
+
+### `/constructapikey`
+
+Opens the API key configuration screen on the client.
+
+---
+
+## Future Ideas
+
+Some possible improvements for the project include:
+
+* schematic preview before download
+* support for multiple generation styles
+* integration with WorldEdit
+* generation of larger or multi-part structures
+
+Contributions, ideas, and feedback are always welcome.
