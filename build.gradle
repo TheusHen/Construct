@@ -43,8 +43,8 @@ dependencies {
     modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
 
     modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_version}"
-    implementation "com.fasterxml.jackson.core:jackson-databind:2.20.0"
-    implementation "com.google.genai:google-genai:1.36.0"
+    include(implementation("com.fasterxml.jackson.core:jackson-databind:2.20.0"))
+    include(implementation("com.google.genai:google-genai:1.36.0"))
 }
 
 processResources {
