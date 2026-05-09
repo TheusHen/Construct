@@ -7,8 +7,8 @@ import org.slf4j.LoggerFactory;
 public class Construct implements ModInitializer {
     private static final Logger LOGGER = LoggerFactory.getLogger(Construct.class);
 
-    // Toggle test-only command registration. True = enable /contruct-test, False = production mode.
-    public static final boolean ENABLE_TEST_COMMAND = true;
+    // Toggle test-only command registration. True = enable /construct-test, False = production mode.
+    public static final boolean ENABLE_TEST_COMMAND = false;
 
     @Override
     public void onInitialize() {

@@ -2,6 +2,8 @@ package org.theushen.construct.utils;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.google.genai.Client;
 import com.google.genai.types.GenerateContentResponse;
 import net.minecraft.nbt.NbtCompound;
@@ -13,8 +15,12 @@ import org.slf4j.LoggerFactory;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
-import java.nio.file.Files;
-import java.nio.file.Path;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HashMap;
@@ -22,12 +28,35 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 public class AI_Call {
     private static final Logger LOGGER = LoggerFactory.getLogger(AI_Call.class);
+    private static final ObjectMapper JSON = new ObjectMapper();
+    private static final ExecutorService PROVIDER_EXECUTOR = Executors.newVirtualThreadPerTaskExecutor();
+
+    public static final String DEFAULT_MODEL = "gemini-2.5-flash";
+    public static final String GEMINI_3_MODEL = "gemini-3.0";
+    public static final String DEFAULT_HACKCLUB_MODEL = "qwen/qwen3-32b";
+
+    private static final String HACKCLUB_API_URL = "https://ai.hackclub.com/proxy/v1/chat/completions";
+    private static final Duration CONNECT_TIMEOUT = Duration.ofSeconds(10);
+    private static final int DEFAULT_REQUEST_TIMEOUT_SECONDS = 45;
+
+    private static final Pattern BASE64_CHUNK_PATTERN = Pattern.compile("([A-Za-z0-9+/=_\\-\\s]{128,})");
+    private static final Pattern CODE_FENCE_PATTERN = Pattern.compile("```(?:[A-Za-z0-9_-]+)?\\s*([\\s\\S]*?)```");
+    private static final Pattern DATA_URI_PATTERN = Pattern.compile("base64,([A-Za-z0-9+/=_\\-\\s]{64,})", Pattern.CASE_INSENSITIVE);
+
+    private static final int MAX_DIMENSION = 32;
+    private static final int MAX_BLOCKS = 32 * 32 * 32;
 
     /**
      * Result of a schematic generation attempt.
@@ -43,62 +72,132 @@ public class AI_Call {
             return new SchemResult(bytes, true, report);
         }
     }
-    private static final ObjectMapper JSON = new ObjectMapper();
 
-    public static final String DEFAULT_MODEL = "gemini-2.5-flash";
-    public static final String GEMINI_3_MODEL = "gemini-3.0";
+    public record ProviderKeys(String hackClubKey, String geminiKey) {
+        public String sanitizedHackClubKey() {
+            return sanitizeKey(hackClubKey);
+        }
 
-    private static final Pattern BASE64_CHUNK_PATTERN = Pattern.compile("([A-Za-z0-9+/=_\\-\\s]{128,})");
-    private static final Pattern CODE_FENCE_PATTERN = Pattern.compile("```(?:[A-Za-z0-9_-]+)?\\s*([\\s\\S]*?)```");
-    private static final Pattern DATA_URI_PATTERN = Pattern.compile("base64,([A-Za-z0-9+/=_\\-\\s]{64,})", Pattern.CASE_INSENSITIVE);
+        public String sanitizedGeminiKey() {
+            return sanitizeKey(geminiKey);
+        }
 
-    private static final int MAX_DIMENSION = 32;
-    private static final int MAX_BLOCKS = 32 * 32 * 32;
+        public boolean hasHackClubKey() {
+            return sanitizedHackClubKey() != null;
+        }
 
-    private final GeminiApi api;
+        public boolean hasGeminiKey() {
+            return sanitizedGeminiKey() != null;
+        }
+    }
+
+    public record ProviderModels(String hackClubModel, String geminiModel) {
+        public String sanitizedHackClubModel() {
+            String normalized = normalizeHackClubModel(hackClubModel);
+            return normalized == null ? DEFAULT_HACKCLUB_MODEL : normalized;
+        }
+
+        public String sanitizedGeminiModel() {
+            String normalized = normalizeGeminiModel(geminiModel);
+            return normalized == null ? DEFAULT_MODEL : normalized;
+        }
+    }
+
+    private final ProviderKeys keys;
+    private final ProviderModels models;
+    private final String systemPrompt;
 
     public AI_Call() {
-        this(resolveDefaultApiKey(), resolveDefaultModel());
+        this(resolveDefaultProviderKeys(), resolveDefaultProviderModels());
     }
 
     public AI_Call(String apiKey) {
-        this(apiKey, resolveDefaultModel());
+        this(new ProviderKeys(null, apiKey), new ProviderModels(null, resolveDefaultModel()));
     }
 
     public AI_Call(String apiKey, String model) {
-        this.api = new GeminiApi(apiKey, normalizeModel(model));
+        this(new ProviderKeys(null, apiKey), new ProviderModels(null, model));
+    }
+
+    public AI_Call(ProviderKeys keys, ProviderModels models) {
+        this.keys = keys == null ? new ProviderKeys(null, null) : keys;
+        this.models = models == null ? resolveDefaultProviderModels() : models;
+        this.systemPrompt = readResourceText("ConstructPrompt.txt");
+    }
+
+    public static ProviderKeys resolveDefaultProviderKeys() {
+        String hackClubKey = System.getProperty("construct.hackclubApiKey");
+        if (hackClubKey == null || hackClubKey.isBlank()) {
+            hackClubKey = System.getenv("HACKCLUB_AI_API_KEY");
+        }
+        if (hackClubKey == null || hackClubKey.isBlank()) {
+            hackClubKey = System.getenv("HACK_CLUB_AI_API_KEY");
+        }
+        if (hackClubKey == null || hackClubKey.isBlank()) {
+            hackClubKey = System.getenv("HACKCLUB_API_KEY");
+        }
+
+        String geminiKey = System.getProperty("construct.geminiApiKey");
+        if (geminiKey == null || geminiKey.isBlank()) {
+            geminiKey = System.getProperty("construct.apiKey");
+        }
+        if (geminiKey == null || geminiKey.isBlank()) {
+            geminiKey = System.getenv("GEMINI_API_KEY");
+        }
+        if (geminiKey == null || geminiKey.isBlank()) {
+            geminiKey = System.getenv("GOOGLE_API_KEY");
+        }
+        if (geminiKey == null || geminiKey.isBlank()) {
+            geminiKey = System.getenv("API_KEY");
+        }
+
+        return new ProviderKeys(hackClubKey, geminiKey);
+    }
+
+    public static ProviderModels resolveDefaultProviderModels() {
+        String hackClubModel = System.getProperty("construct.hackclubModel");
+        if (hackClubModel == null || hackClubModel.isBlank()) {
+            hackClubModel = System.getenv("HACKCLUB_AI_MODEL");
+        }
+        if (hackClubModel == null || hackClubModel.isBlank()) {
+            hackClubModel = System.getenv("HACK_CLUB_AI_MODEL");
+        }
+
+        String geminiModel = System.getProperty("construct.geminiModel");
+        if (geminiModel == null || geminiModel.isBlank()) {
+            geminiModel = System.getProperty("construct.model");
+        }
+        if (geminiModel == null || geminiModel.isBlank()) {
+            geminiModel = System.getenv("GEMINI_MODEL");
+        }
+        if (geminiModel == null || geminiModel.isBlank()) {
+            geminiModel = System.getenv("GOOGLE_GEMINI_MODEL");
+        }
+
+        return new ProviderModels(hackClubModel, geminiModel);
     }
 
     public static String resolveDefaultApiKey() {
-        String key = System.getProperty("construct.apiKey");
-        if (key == null || key.isBlank()) {
-            key = System.getenv("GEMINI_API_KEY");
-        }
-        if (key == null || key.isBlank()) {
-            key = System.getenv("GOOGLE_API_KEY");
-        }
-        if (key == null || key.isBlank()) {
-            key = System.getenv("API_KEY");
-        }
-        if (key == null || key.isBlank()) {
-            return null;
-        }
-        return key.trim();
+        return resolveDefaultProviderKeys().sanitizedGeminiKey();
+    }
+
+    public static String resolveDefaultHackClubApiKey() {
+        return resolveDefaultProviderKeys().sanitizedHackClubKey();
     }
 
     public static String resolveDefaultModel() {
-        String model = System.getProperty("construct.model");
-        if (model == null || model.isBlank()) {
-            model = System.getenv("GEMINI_MODEL");
-        }
-        if (model == null || model.isBlank()) {
-            model = System.getenv("GOOGLE_GEMINI_MODEL");
-        }
-        String normalized = normalizeModel(model);
-        return normalized == null ? DEFAULT_MODEL : normalized;
+        return resolveDefaultProviderModels().sanitizedGeminiModel();
+    }
+
+    public static String resolveDefaultHackClubModel() {
+        return resolveDefaultProviderModels().sanitizedHackClubModel();
     }
 
     public static String normalizeModel(String model) {
+        return normalizeGeminiModel(model);
+    }
+
+    public static String normalizeGeminiModel(String model) {
         if (model == null) {
             return null;
         }
@@ -121,57 +220,81 @@ public class AI_Call {
         return null;
     }
 
+    public static String normalizeHackClubModel(String model) {
+        if (model == null) {
+            return null;
+        }
+        String trimmed = model.trim();
+        return trimmed.isBlank() ? null : trimmed;
+    }
+
     public SchemResult generateSchemBytes(String buildingRequest) throws Exception {
         long t0 = System.nanoTime();
         LOGGER.info("AI_Call start: request='{}'", oneLine(buildingRequest));
 
         StringBuilder diag = new StringBuilder();
         diag.append("Request: '").append(oneLine(buildingRequest)).append("'\n");
-        diag.append("Model: ").append(api.model).append("\n");
+        diag.append("Provider order: ").append(providerSummary()).append("\n");
+        diag.append("Timeout per provider: ").append(resolveRequestTimeoutSeconds()).append("s\n");
 
-        Exception lastError = null;
-        try {
-            String prompt = buildPrompt(buildingRequest);
-            diag.append("Prompt: systemPromptChars=").append(api.systemPrompt.length())
-                    .append(", userPromptChars=").append(prompt.length()).append("\n");
+        String prompt = buildPrompt(buildingRequest);
+        diag.append("Prompt: systemPromptChars=").append(systemPrompt.length())
+                .append(", userPromptChars=").append(prompt.length()).append("\n");
 
-            String raw = api.chat(prompt);
-            int rawChars = raw == null ? 0 : raw.length();
-            LOGGER.info("AI_Call response received: rawChars={}", rawChars);
-            diag.append("AI response: chars=").append(rawChars).append("\n");
-
-            byte[] jsonSchem = tryDecodeJsonBlueprint(raw, diag);
-            if (jsonSchem != null) {
-                LOGGER.info("AI_Call json blueprint success: bytes={}, durationMs={}", jsonSchem.length, elapsedMs(t0));
-                return SchemResult.success(jsonSchem);
-            }
-
-            List<String> base64Candidates = sanitizeCandidates(extractBase64Candidates(raw));
-            LOGGER.info("AI_Call base64 candidates: count={}", base64Candidates.size());
-            diag.append("Base64 candidates: ").append(base64Candidates.size()).append("\n");
-
-            for (int i = 0; i < base64Candidates.size(); i++) {
-                String candidate = base64Candidates.get(i);
-                try {
-                    byte[] bytes = Base64.getDecoder().decode(candidate);
-                    validateSchemPayload(bytes);
-                    LOGGER.info("AI_Call base64 success: index={}, bytes={}, durationMs={}", i + 1, bytes.length, elapsedMs(t0));
-                    return SchemResult.success(bytes);
-                } catch (Exception ex) {
-                    String reason = oneLine(ex.getMessage());
-                    LOGGER.warn("AI_Call base64 candidate rejected: index={}, reason='{}'", i + 1, reason);
-                    diag.append("  base64[").append(i + 1).append("] rejected: ").append(reason).append("\n");
-                    lastError = ex;
-                }
-            }
-
-            throw new IllegalStateException("AI did not return a valid schematic payload.");
-        } catch (Exception e) {
-            lastError = e;
-            LOGGER.warn("AI_Call failed: {}", oneLine(e.getMessage()));
-            diag.append("Failure: ").append(oneLine(e.getMessage())).append("\n");
+        List<ProviderApi> providers = resolveProviders();
+        if (providers.isEmpty()) {
+            throw new IllegalStateException("No AI API key configured. Set a Hack Club AI key or Gemini key first.");
         }
 
+        Exception lastError = null;
+        for (ProviderApi provider : providers) {
+            diag.append("Attempt: provider=").append(provider.name()).append(", model=").append(provider.model()).append("\n");
+            try {
+                String raw = provider.chat(systemPrompt, prompt);
+                int rawChars = raw == null ? 0 : raw.length();
+                LOGGER.info("AI_Call response received: provider='{}', rawChars={}", provider.name(), rawChars);
+                diag.append("AI response: provider=").append(provider.name()).append(", chars=").append(rawChars).append("\n");
+
+                byte[] jsonSchem = tryDecodeJsonBlueprint(raw, diag);
+                if (jsonSchem != null) {
+                    LOGGER.info("AI_Call json blueprint success: provider='{}', bytes={}, durationMs={}",
+                            provider.name(), jsonSchem.length, elapsedMs(t0));
+                    return SchemResult.success(jsonSchem);
+                }
+
+                List<String> base64Candidates = sanitizeCandidates(extractBase64Candidates(raw));
+                LOGGER.info("AI_Call base64 candidates: provider='{}', count={}", provider.name(), base64Candidates.size());
+                diag.append("Base64 candidates: provider=").append(provider.name()).append(", count=").append(base64Candidates.size()).append("\n");
+
+                for (int i = 0; i < base64Candidates.size(); i++) {
+                    String candidate = base64Candidates.get(i);
+                    try {
+                        byte[] bytes = Base64.getDecoder().decode(candidate);
+                        validateSchemPayload(bytes);
+                        LOGGER.info("AI_Call base64 success: provider='{}', index={}, bytes={}, durationMs={}",
+                                provider.name(), i + 1, bytes.length, elapsedMs(t0));
+                        return SchemResult.success(bytes);
+                    } catch (Exception ex) {
+                        String reason = oneLine(ex.getMessage());
+                        LOGGER.warn("AI_Call base64 candidate rejected: provider='{}', index={}, reason='{}'",
+                                provider.name(), i + 1, reason);
+                        diag.append("  base64[").append(i + 1).append("] rejected: ").append(reason).append("\n");
+                        lastError = ex;
+                    }
+                }
+
+                throw new IllegalStateException("provider did not return a valid schematic payload");
+            } catch (Exception e) {
+                lastError = e;
+                LOGGER.warn("AI_Call provider failed: provider='{}', reason='{}'", provider.name(), oneLine(e.getMessage()));
+                diag.append("Failure: provider=").append(provider.name()).append(", reason=")
+                        .append(oneLine(e.getMessage())).append("\n");
+            }
+        }
+
+        if (lastError != null) {
+            diag.append("Last error: ").append(oneLine(lastError.getMessage())).append("\n");
+        }
         diag.append("Fallback: procedural house (9x6x9) placed instead of requested build.");
         String diagnosticReport = diag.toString();
 
@@ -186,6 +309,34 @@ public class AI_Call {
     public String generateSchemBase64(String buildingRequest) throws Exception {
         SchemResult result = generateSchemBytes(buildingRequest);
         return Base64.getEncoder().encodeToString(result.bytes());
+    }
+
+    private List<ProviderApi> resolveProviders() {
+        List<ProviderApi> providers = new ArrayList<>();
+        String hackClubKey = keys.sanitizedHackClubKey();
+        String geminiKey = keys.sanitizedGeminiKey();
+
+        if (hackClubKey != null) {
+            providers.add(new HackClubApi(hackClubKey, models.sanitizedHackClubModel()));
+        }
+        if (geminiKey != null) {
+            providers.add(new GeminiApi(geminiKey, models.sanitizedGeminiModel()));
+        }
+        return providers;
+    }
+
+    private String providerSummary() {
+        List<String> names = new ArrayList<>();
+        if (keys.hasHackClubKey()) {
+            names.add("hackclub(" + models.sanitizedHackClubModel() + ")");
+        }
+        if (keys.hasGeminiKey()) {
+            names.add("gemini(" + models.sanitizedGeminiModel() + ")");
+        }
+        if (names.isEmpty()) {
+            return "none";
+        }
+        return String.join(" -> ", names);
     }
 
     private static String buildPrompt(String buildingRequest) {
@@ -239,7 +390,6 @@ public class AI_Call {
         String trimmed = raw.trim();
         LinkedHashSet<String> out = new LinkedHashSet<>();
 
-        // Closed code fences
         Matcher fenceMatcher = CODE_FENCE_PATTERN.matcher(trimmed);
         while (fenceMatcher.find()) {
             String content = fenceMatcher.group(1);
@@ -248,7 +398,6 @@ public class AI_Call {
             }
         }
 
-        // Unclosed code fence — response was truncated before the closing ```
         if (out.isEmpty()) {
             Matcher openFence = Pattern.compile("```(?:[A-Za-z0-9_-]+)?\\s*([\\s\\S]+)").matcher(trimmed);
             if (openFence.find()) {
@@ -264,17 +413,14 @@ public class AI_Call {
             }
         }
 
-        // Balanced objects anywhere in the raw response.
         out.addAll(extractBalancedJsonObjects(trimmed));
 
-        // Raw JSON with both braces present
         int first = trimmed.indexOf('{');
         int last = trimmed.lastIndexOf('}');
         if (first >= 0 && last > first) {
             out.add(trimmed.substring(first, last + 1));
         }
 
-        // Raw JSON with opening brace but truncated (no closing brace)
         if (first >= 0 && last < first) {
             out.add(repairTruncatedJson(trimmed.substring(first)));
         }
@@ -335,7 +481,6 @@ public class AI_Call {
         return new ArrayList<>(out);
     }
 
-    /** Closes any unclosed JSON arrays/objects caused by a truncated response. */
     private static String repairTruncatedJson(String candidate) {
         if (candidate == null) {
             return "";
@@ -604,7 +749,6 @@ public class AI_Call {
             List<Integer> flat = new ArrayList<>();
             flattenIntArray(blocksNode, flat);
             if (!flat.isEmpty()) {
-                // Accept full or truncated arrays; missing trailing blocks default to air.
                 int count = Math.min(flat.size(), total);
                 for (int i = 0; i < count; i++) {
                     ids[i] = checkedPaletteId(flat.get(i), palette.size(), i);
@@ -641,10 +785,16 @@ public class AI_Call {
             outer:
             for (int y = 0; y < height; y++) {
                 JsonNode yLayer = layersNode.get(y);
-                if (!yLayer.isArray() || yLayer.size() != length) { valid = false; break; }
+                if (!yLayer.isArray() || yLayer.size() != length) {
+                    valid = false;
+                    break;
+                }
                 for (int z = 0; z < length; z++) {
                     JsonNode zRow = yLayer.get(z);
-                    if (!zRow.isArray() || zRow.size() != width) { valid = false; break outer; }
+                    if (!zRow.isArray() || zRow.size() != width) {
+                        valid = false;
+                        break outer;
+                    }
                     for (int x = 0; x < width; x++) {
                         String blockName = zRow.get(x).asText("");
                         int idx = (y * length + z) * width + x;
@@ -652,7 +802,9 @@ public class AI_Call {
                     }
                 }
             }
-            if (valid) return ids;
+            if (valid) {
+                return ids;
+            }
         }
 
         JsonNode placements = root.path("placements");
@@ -907,51 +1059,244 @@ public class AI_Call {
         return TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAtNano);
     }
 
-    private static class GeminiApi {
+    private static String sanitizeKey(String key) {
+        if (key == null) {
+            return null;
+        }
+        String trimmed = key.trim();
+        return trimmed.isBlank() ? null : trimmed;
+    }
+
+    private static int resolveRequestTimeoutSeconds() {
+        String raw = System.getProperty("construct.aiTimeoutSeconds");
+        if (raw == null || raw.isBlank()) {
+            raw = System.getenv("CONSTRUCT_AI_TIMEOUT_SECONDS");
+        }
+        if (raw != null && !raw.isBlank()) {
+            try {
+                int parsed = Integer.parseInt(raw.trim());
+                if (parsed > 0) {
+                    return parsed;
+                }
+            } catch (NumberFormatException ignored) {
+            }
+        }
+        return DEFAULT_REQUEST_TIMEOUT_SECONDS;
+    }
+
+    private static String readResourceText(String resource) {
+        ClassLoader classLoader = AI_Call.class.getClassLoader();
+        try (InputStream inputStream = classLoader.getResourceAsStream(resource)) {
+            if (inputStream == null) {
+                throw new IllegalStateException("Resource not found: " + resource);
+            }
+            byte[] bytes = inputStream.readAllBytes();
+            return new String(bytes, StandardCharsets.UTF_8);
+        } catch (Exception e) {
+            throw new RuntimeException("Error reading resource: " + resource, e);
+        }
+    }
+
+    private static <T> T callWithTimeout(String label, ThrowingSupplier<T> supplier) throws Exception {
+        CompletableFuture<T> future = CompletableFuture.supplyAsync(() -> {
+            try {
+                return supplier.get();
+            } catch (Exception e) {
+                throw new CompletionException(e);
+            }
+        }, PROVIDER_EXECUTOR);
+
+        try {
+            return future.get(resolveRequestTimeoutSeconds(), TimeUnit.SECONDS);
+        } catch (TimeoutException e) {
+            future.cancel(true);
+            throw new IllegalStateException(label + " timed out after " + resolveRequestTimeoutSeconds() + "s", e);
+        } catch (InterruptedException e) {
+            future.cancel(true);
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException(label + " was interrupted", e);
+        } catch (ExecutionException e) {
+            Throwable cause = e.getCause();
+            if (cause instanceof CompletionException completion && completion.getCause() != null) {
+                cause = completion.getCause();
+            }
+            if (cause instanceof Exception exception) {
+                throw exception;
+            }
+            throw new RuntimeException(cause);
+        }
+    }
+
+    private static String extractOpenAiMessageContent(JsonNode root) {
+        JsonNode choices = root.path("choices");
+        if (!choices.isArray() || choices.isEmpty()) {
+            return null;
+        }
+
+        JsonNode choice = choices.get(0);
+        JsonNode message = choice.path("message");
+        JsonNode content = message.path("content");
+        if (content.isTextual()) {
+            return content.asText();
+        }
+        if (content.isArray()) {
+            StringBuilder out = new StringBuilder();
+            for (JsonNode item : content) {
+                if (item.isTextual()) {
+                    out.append(item.asText());
+                } else {
+                    String text = item.path("text").asText("");
+                    if (!text.isBlank()) {
+                        out.append(text);
+                    }
+                }
+            }
+            return out.toString();
+        }
+
+        JsonNode text = choice.path("text");
+        if (text.isTextual()) {
+            return text.asText();
+        }
+        return null;
+    }
+
+    @FunctionalInterface
+    private interface ThrowingSupplier<T> {
+        T get() throws Exception;
+    }
+
+    private interface ProviderApi {
+        String name();
+
+        String model();
+
+        String chat(String systemPrompt, String userMessage) throws Exception;
+    }
+
+    private static final class GeminiApi implements ProviderApi {
         private final Client client;
-        private final String systemPrompt;
         private final String model;
 
         GeminiApi(String apiKey, String model) {
-            String key = apiKey == null ? "" : apiKey.trim();
-            if (key.isBlank()) {
-                throw new IllegalStateException("API key is missing");
+            String key = sanitizeKey(apiKey);
+            if (key == null) {
+                throw new IllegalStateException("Gemini API key is missing");
             }
             this.client = Client.builder().apiKey(key).build();
-            this.systemPrompt = readResourceText("ConstructPrompt.txt");
-            String normalized = normalizeModel(model);
-            this.model = normalized == null ? DEFAULT_MODEL : normalized;
+            this.model = normalizeGeminiModel(model) == null ? DEFAULT_MODEL : normalizeGeminiModel(model);
         }
 
-        String chat(String userMessage) {
-            long t0 = System.nanoTime();
-            String fullPrompt = systemPrompt + "\n\nUser request: " + userMessage;
-            LOGGER.info("AI_Call sending to model='{}': systemPromptChars={}, userMessageChars={}, totalChars={}",
-                    model, systemPrompt.length(), userMessage.length(), fullPrompt.length());
-            LOGGER.info("=== PROMPT SENT TO AI ===\n{}\n=== END PROMPT ===", fullPrompt);
-            GenerateContentResponse response = client.models.generateContent(model, fullPrompt, null);
-            String text = response.text();
-            LOGGER.info("Gemini response: model='{}', durationMs={}, responseChars={}",
-                    model, elapsedMs(t0), text == null ? 0 : text.length());
-            if (text != null && !text.isBlank()) {
-                LOGGER.info("=== RAW AI RESPONSE ===\n{}\n=== END RESPONSE ===", text);
-            } else {
-                LOGGER.warn("Gemini returned null or blank response: model='{}'", model);
-            }
-            return text;
+        @Override
+        public String name() {
+            return "gemini";
         }
 
-        private static String readResourceText(String resource) {
-            ClassLoader classLoader = AI_Call.class.getClassLoader();
-            try (InputStream inputStream = classLoader.getResourceAsStream(resource)) {
-                if (inputStream == null) {
-                    throw new IllegalStateException("Resource not found: " + resource);
+        @Override
+        public String model() {
+            return model;
+        }
+
+        @Override
+        public String chat(String systemPrompt, String userMessage) throws Exception {
+            return callWithTimeout("Gemini request", () -> {
+                long t0 = System.nanoTime();
+                String fullPrompt = systemPrompt + "\n\nUser request: " + userMessage;
+                LOGGER.info("AI_Call sending to provider='{}', model='{}': systemPromptChars={}, userMessageChars={}, totalChars={}",
+                        name(), model, systemPrompt.length(), userMessage.length(), fullPrompt.length());
+                LOGGER.info("=== PROMPT SENT TO {} ===\n{}\n=== END PROMPT ===", name().toUpperCase(Locale.ROOT), fullPrompt);
+
+                GenerateContentResponse response = client.models.generateContent(model, fullPrompt, null);
+                String text = response.text();
+                LOGGER.info("AI_Call provider response: provider='{}', model='{}', durationMs={}, responseChars={}",
+                        name(), model, elapsedMs(t0), text == null ? 0 : text.length());
+                if (text == null || text.isBlank()) {
+                    throw new IllegalStateException("Gemini returned a blank response");
                 }
-                byte[] bytes = inputStream.readAllBytes();
-                return new String(bytes, java.nio.charset.StandardCharsets.UTF_8);
-            } catch (Exception e) {
-                throw new RuntimeException("Error reading resource: " + resource, e);
+                LOGGER.info("=== RAW {} RESPONSE ===\n{}\n=== END RESPONSE ===",
+                        name().toUpperCase(Locale.ROOT), text);
+                return text;
+            });
+        }
+    }
+
+    private static final class HackClubApi implements ProviderApi {
+        private final HttpClient client;
+        private final String apiKey;
+        private final String model;
+
+        HackClubApi(String apiKey, String model) {
+            String key = sanitizeKey(apiKey);
+            if (key == null) {
+                throw new IllegalStateException("Hack Club AI API key is missing");
             }
+            this.client = HttpClient.newBuilder()
+                    .connectTimeout(CONNECT_TIMEOUT)
+                    .build();
+            this.apiKey = key;
+            this.model = normalizeHackClubModel(model) == null ? DEFAULT_HACKCLUB_MODEL : normalizeHackClubModel(model);
+        }
+
+        @Override
+        public String name() {
+            return "hackclub";
+        }
+
+        @Override
+        public String model() {
+            return model;
+        }
+
+        @Override
+        public String chat(String systemPrompt, String userMessage) throws Exception {
+            return callWithTimeout("Hack Club AI request", () -> {
+                long t0 = System.nanoTime();
+
+                ObjectNode root = JSON.createObjectNode();
+                root.put("model", model);
+                ArrayNode messages = root.putArray("messages");
+                messages.addObject()
+                        .put("role", "system")
+                        .put("content", systemPrompt);
+                messages.addObject()
+                        .put("role", "user")
+                        .put("content", userMessage);
+
+                String body = JSON.writeValueAsString(root);
+                LOGGER.info("AI_Call sending to provider='{}', model='{}': systemPromptChars={}, userMessageChars={}, totalChars={}",
+                        name(), model, systemPrompt.length(), userMessage.length(), body.length());
+                LOGGER.info("=== PROMPT SENT TO {} ===\n{}\n=== END PROMPT ===", name().toUpperCase(Locale.ROOT), body);
+
+                HttpRequest request = HttpRequest.newBuilder(URI.create(HACKCLUB_API_URL))
+                        .timeout(Duration.ofSeconds(resolveRequestTimeoutSeconds()))
+                        .header("Authorization", "Bearer " + apiKey)
+                        .header("Content-Type", "application/json")
+                        .header("Accept", "application/json")
+                        .POST(HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8))
+                        .build();
+
+                HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+                String responseBody = response.body() == null ? "" : response.body();
+                LOGGER.info("AI_Call provider response: provider='{}', model='{}', status={}, durationMs={}, responseChars={}",
+                        name(), model, response.statusCode(), elapsedMs(t0), responseBody.length());
+                LOGGER.info("=== RAW {} RESPONSE ===\n{}\n=== END RESPONSE ===",
+                        name().toUpperCase(Locale.ROOT), responseBody);
+
+                if (response.statusCode() >= 400) {
+                    throw new IllegalStateException("Hack Club AI HTTP " + response.statusCode() + ": " + oneLine(responseBody));
+                }
+
+                JsonNode parsed = JSON.readTree(responseBody);
+                if (parsed.hasNonNull("error")) {
+                    throw new IllegalStateException("Hack Club AI error: " + oneLine(parsed.path("error").toString()));
+                }
+
+                String content = extractOpenAiMessageContent(parsed);
+                if (content == null || content.isBlank()) {
+                    throw new IllegalStateException("Hack Club AI returned a blank response");
+                }
+                return content;
+            });
         }
     }
 }

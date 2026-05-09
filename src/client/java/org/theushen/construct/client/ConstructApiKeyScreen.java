@@ -9,11 +9,18 @@ import net.minecraft.text.Text;
 public class ConstructApiKeyScreen extends Screen {
 
     private final Screen parent;
-    private TextFieldWidget keyField;
+    private final String initialFocusTarget;
+    private TextFieldWidget hackClubField;
+    private TextFieldWidget geminiField;
 
     public ConstructApiKeyScreen(Screen parent) {
-        super(Text.literal("Construct API Key"));
+        this(parent, "hackclub");
+    }
+
+    public ConstructApiKeyScreen(Screen parent, String initialFocusTarget) {
+        super(Text.literal("Construct AI Keys"));
         this.parent = parent;
+        this.initialFocusTarget = initialFocusTarget == null ? "hackclub" : initialFocusTarget;
     }
 
     @Override
@@ -21,29 +28,31 @@ public class ConstructApiKeyScreen extends Screen {
         int w = this.width;
         int h = this.height;
 
-        String existing = ConstructKeyConfig.getKey();
+        this.hackClubField = new TextFieldWidget(this.textRenderer, w / 2 - 140, h / 2 - 28, 280, 20, Text.literal(""));
+        this.hackClubField.setMaxLength(256);
+        this.hackClubField.setText(ConstructKeyConfig.getHackClubKey());
+        this.addDrawableChild(this.hackClubField);
 
-        this.keyField = new TextFieldWidget(this.textRenderer, w / 2 - 140, h / 2 - 22, 280, 20, Text.literal(""));
-        this.keyField.setMaxLength(256);
-        this.keyField.setText(existing);
-        this.addDrawableChild(this.keyField);
+        this.geminiField = new TextFieldWidget(this.textRenderer, w / 2 - 140, h / 2 + 14, 280, 20, Text.literal(""));
+        this.geminiField.setMaxLength(256);
+        this.geminiField.setText(ConstructKeyConfig.getGeminiKey());
+        this.addDrawableChild(this.geminiField);
 
         this.addDrawableChild(ButtonWidget.builder(Text.literal("Save & Send"), btn -> {
-            String key = keyField.getText().trim();
-            ConstructClient.saveAndSend(key);
+            ConstructClient.saveAndSend(hackClubField.getText().trim(), geminiField.getText().trim());
             this.close();
-        }).dimensions(w / 2 - 140, h / 2 + 6, 136, 20).build());
+        }).dimensions(w / 2 - 140, h / 2 + 48, 136, 20).build());
 
-        this.addDrawableChild(ButtonWidget.builder(Text.literal("Clear"), btn -> {
-            ConstructClient.saveAndSend("");
+        this.addDrawableChild(ButtonWidget.builder(Text.literal("Clear All"), btn -> {
+            ConstructClient.saveAndSend("", "");
             this.close();
-        }).dimensions(w / 2 + 4, h / 2 + 6, 68, 20).build());
+        }).dimensions(w / 2 + 4, h / 2 + 48, 68, 20).build());
 
         this.addDrawableChild(ButtonWidget.builder(Text.literal("Cancel"), btn -> {
             this.close();
-        }).dimensions(w / 2 + 76, h / 2 + 6, 64, 20).build());
+        }).dimensions(w / 2 + 76, h / 2 + 48, 64, 20).build());
 
-        this.setInitialFocus(this.keyField);
+        this.setInitialFocus("gemini".equalsIgnoreCase(initialFocusTarget) ? this.geminiField : this.hackClubField);
     }
 
     @Override
@@ -52,17 +61,23 @@ public class ConstructApiKeyScreen extends Screen {
         context.fillGradient(0, 0, this.width, this.height, 0xC0101010, 0xD0101010);
         super.render(context, mouseX, mouseY, delta);
 
-        String key = ConstructKeyConfig.getKey();
-        boolean set = key != null && !key.isBlank();
+        boolean hackClubSet = !ConstructKeyConfig.getHackClubKey().isBlank();
+        boolean geminiSet = !ConstructKeyConfig.getGeminiKey().isBlank();
 
-        context.drawCenteredTextWithShadow(this.textRenderer, this.title, this.width / 2, this.height / 2 - 60, 0xFFFFFF);
-        context.drawTextWithShadow(this.textRenderer, "Status: " + (set ? "set" : "unset"), this.width / 2 - 140, this.height / 2 - 45, 0xFFFFFF);
-        context.drawTextWithShadow(this.textRenderer, "API Key:", this.width / 2 - 140, this.height / 2 - 34, 0xFFFFFF);
+        context.drawCenteredTextWithShadow(this.textRenderer, this.title, this.width / 2, this.height / 2 - 68, 0xFFFFFF);
+        context.drawTextWithShadow(this.textRenderer, "Hack Club AI: " + (hackClubSet ? "set" : "unset"), this.width / 2 - 140, this.height / 2 - 50, 0xFFFFFF);
+        context.drawTextWithShadow(this.textRenderer, "Primary provider. Used first when present.", this.width / 2 - 140, this.height / 2 - 40, 0xAAAAAA);
+        context.drawTextWithShadow(this.textRenderer, "Hack Club API Key:", this.width / 2 - 140, this.height / 2 - 30, 0xFFFFFF);
 
-        String masked = mask(this.keyField.getText());
-        context.drawTextWithShadow(this.textRenderer, masked, this.width / 2 - 136, this.height / 2 - 18, 0xAAAAAA);
+        context.drawTextWithShadow(this.textRenderer, "Gemini: " + (geminiSet ? "set" : "unset"), this.width / 2 - 140, this.height / 2 - 8, 0xFFFFFF);
+        context.drawTextWithShadow(this.textRenderer, "Fallback provider when Hack Club fails or is unset.", this.width / 2 - 140, this.height / 2 + 2, 0xAAAAAA);
+        context.drawTextWithShadow(this.textRenderer, "Gemini API Key:", this.width / 2 - 140, this.height / 2 + 12, 0xFFFFFF);
 
-        this.keyField.render(context, mouseX, mouseY, delta);
+        context.drawTextWithShadow(this.textRenderer, mask(this.hackClubField.getText()), this.width / 2 - 136, this.height / 2 - 16, 0xAAAAAA);
+        context.drawTextWithShadow(this.textRenderer, mask(this.geminiField.getText()), this.width / 2 - 136, this.height / 2 + 26, 0xAAAAAA);
+
+        this.hackClubField.render(context, mouseX, mouseY, delta);
+        this.geminiField.render(context, mouseX, mouseY, delta);
     }
 
     @Override

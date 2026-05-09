@@ -43,10 +43,10 @@ dependencies {
     modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
 
     modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_version}"
-    def jacksonVersion = "2.20.0"
+    def jacksonVersion = "2.19.2"
     include(implementation("com.fasterxml.jackson.core:jackson-databind:$jacksonVersion"))
     include(implementation("com.fasterxml.jackson.core:jackson-core:$jacksonVersion"))
-    include(implementation("com.fasterxml.jackson.core:jackson-annotations:2.20"))
+    include(implementation("com.fasterxml.jackson.core:jackson-annotations:$jacksonVersion"))
     include(implementation("com.google.genai:google-genai:1.36.0"))
 }
 

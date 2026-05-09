@@ -16,7 +16,8 @@ public final class ConstructKeyConfig {
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final Path FILE = FabricLoader.getInstance().getConfigDir().resolve("construct.json");
 
-    private static String apiKey = "";
+    private static String geminiKey = "";
+    private static String hackClubKey = "";
 
     private ConstructKeyConfig() {
     }
@@ -30,16 +31,22 @@ public final class ConstructKeyConfig {
         try {
             String raw = Files.readString(FILE, StandardCharsets.UTF_8);
             JsonNode root = MAPPER.readTree(raw);
-            apiKey = root.path("apiKey").asText("");
+            geminiKey = root.path("geminiKey").asText("");
+            hackClubKey = root.path("hackClubKey").asText("");
+            if (geminiKey.isBlank()) {
+                geminiKey = root.path("apiKey").asText("");
+            }
         } catch (IOException e) {
-            apiKey = "";
+            geminiKey = "";
+            hackClubKey = "";
         }
     }
 
     public static void save() {
         try {
             ObjectNode root = MAPPER.createObjectNode();
-            root.put("apiKey", apiKey == null ? "" : apiKey);
+            root.put("geminiKey", geminiKey == null ? "" : geminiKey);
+            root.put("hackClubKey", hackClubKey == null ? "" : hackClubKey);
             String json = MAPPER.writerWithDefaultPrettyPrinter().writeValueAsString(root);
             Files.createDirectories(FILE.getParent());
             Files.writeString(FILE, json, StandardCharsets.UTF_8);
@@ -47,12 +54,27 @@ public final class ConstructKeyConfig {
         }
     }
 
-    public static String getKey() {
-        return apiKey == null ? "" : apiKey;
+    public static String getGeminiKey() {
+        return geminiKey == null ? "" : geminiKey;
     }
 
-    public static void setKey(String key) {
-        apiKey = key == null ? "" : key.trim();
+    public static String getHackClubKey() {
+        return hackClubKey == null ? "" : hackClubKey;
+    }
+
+    public static void setGeminiKey(String key) {
+        geminiKey = key == null ? "" : key.trim();
+        save();
+    }
+
+    public static void setHackClubKey(String key) {
+        hackClubKey = key == null ? "" : key.trim();
+        save();
+    }
+
+    public static void setKeys(String newHackClubKey, String newGeminiKey) {
+        hackClubKey = newHackClubKey == null ? "" : newHackClubKey.trim();
+        geminiKey = newGeminiKey == null ? "" : newGeminiKey.trim();
         save();
     }
 }

@@ -24,13 +24,39 @@ public class ConstructClient implements ClientModInitializer {
         ClientCommandRegistrationCallback.EVENT.register((dispatcher, registryAccess) -> dispatcher.register(
                 ClientCommandManager.literal("constructapikey")
                         .executes(context -> {
-                            openKeyScreen();
+                            openKeyScreen("hackclub");
                             return 1;
                         })
                         .then(ClientCommandManager.literal("clear")
                                 .executes(context -> {
-                                    ConstructKeyConfig.setKey("");
-                                    sendApiKeyToServer("");
+                                    ConstructKeyConfig.setKeys("", "");
+                                    sendKeysToServer("", "");
+                                    return 1;
+                                }))));
+
+        ClientCommandRegistrationCallback.EVENT.register((dispatcher, registryAccess) -> dispatcher.register(
+                ClientCommandManager.literal("constructgeminikey")
+                        .executes(context -> {
+                            openKeyScreen("gemini");
+                            return 1;
+                        })
+                        .then(ClientCommandManager.literal("clear")
+                                .executes(context -> {
+                                    ConstructKeyConfig.setGeminiKey("");
+                                    sendKeysToServer(ConstructKeyConfig.getHackClubKey(), "");
+                                    return 1;
+                                }))));
+
+        ClientCommandRegistrationCallback.EVENT.register((dispatcher, registryAccess) -> dispatcher.register(
+                ClientCommandManager.literal("constructhackclubkey")
+                        .executes(context -> {
+                            openKeyScreen("hackclub");
+                            return 1;
+                        })
+                        .then(ClientCommandManager.literal("clear")
+                                .executes(context -> {
+                                    ConstructKeyConfig.setHackClubKey("");
+                                    sendKeysToServer("", ConstructKeyConfig.getGeminiKey());
                                     return 1;
                                 }))));
 
@@ -42,9 +68,10 @@ public class ConstructClient implements ClientModInitializer {
             if (!shouldResendOnTick) return;
             shouldResendOnTick = false;
 
-            String key = ConstructKeyConfig.getKey();
-            if (key != null && !key.isBlank()) {
-                sendApiKeyToServer(key);
+            String hackClubKey = ConstructKeyConfig.getHackClubKey();
+            String geminiKey = ConstructKeyConfig.getGeminiKey();
+            if ((hackClubKey != null && !hackClubKey.isBlank()) || (geminiKey != null && !geminiKey.isBlank())) {
+                sendKeysToServer(hackClubKey, geminiKey);
             }
         });
 
@@ -52,24 +79,22 @@ public class ConstructClient implements ClientModInitializer {
             MinecraftClient client = MinecraftClient.getInstance();
             if (client == null || client.player == null) return;
 
-            String key = ConstructKeyConfig.getKey();
-            boolean set = key != null && !key.isBlank();
-
             int x = 6;
             int y = 6;
             drawContext.drawText(client.textRenderer,
-                    "Construct API: " + (set ? "set" : "unset"),
+                    "Construct HC: " + statusLabel(ConstructKeyConfig.getHackClubKey())
+                            + " | Gemini: " + statusLabel(ConstructKeyConfig.getGeminiKey()),
                     x, y, 0xFFFFFF, true);
         });
     }
 
-    private static void openKeyScreen() {
+    private static void openKeyScreen(String focusTarget) {
         MinecraftClient client = MinecraftClient.getInstance();
         if (client == null) return;
-        client.execute(() -> client.setScreen(new ConstructApiKeyScreen(client.currentScreen)));
+        client.execute(() -> client.setScreen(new ConstructApiKeyScreen(client.currentScreen, focusTarget)));
     }
 
-    private static void sendApiKeyToServer(String key) {
+    private static void sendKeysToServer(String hackClubKey, String geminiKey) {
         MinecraftClient client = MinecraftClient.getInstance();
         if (client.getNetworkHandler() == null) {
             showClientMessage("Construct: join a world/server first.");
@@ -80,18 +105,17 @@ public class ConstructClient implements ClientModInitializer {
             return;
         }
 
-        ClientPlayNetworking.send(new ApiKeyPayload(key));
+        String safeHackClubKey = hackClubKey == null ? "" : hackClubKey.trim();
+        String safeGeminiKey = geminiKey == null ? "" : geminiKey.trim();
+        ClientPlayNetworking.send(new ApiKeyPayload(safeGeminiKey, safeHackClubKey));
 
-        if (key.isBlank()) {
-            showClientMessage("Construct: API key cleared.");
-        } else {
-            showClientMessage("Construct: API key sent to server.");
-        }
+        showClientMessage("Construct: keys synced. Hack Club="
+                + statusLabel(safeHackClubKey) + ", Gemini=" + statusLabel(safeGeminiKey) + ".");
     }
 
-    static void saveAndSend(String key) {
-        ConstructKeyConfig.setKey(key);
-        sendApiKeyToServer(key);
+    static void saveAndSend(String hackClubKey, String geminiKey) {
+        ConstructKeyConfig.setKeys(hackClubKey, geminiKey);
+        sendKeysToServer(hackClubKey, geminiKey);
     }
 
     private static void showClientMessage(String message) {
@@ -99,5 +123,9 @@ public class ConstructClient implements ClientModInitializer {
         if (client.player != null) {
             client.player.sendMessage(Text.literal(message), false);
         }
+    }
+
+    private static String statusLabel(String key) {
+        return key == null || key.isBlank() ? "unset" : "set";
     }
 }
